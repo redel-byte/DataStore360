@@ -1,0 +1,43 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python / uv
+.venv/
+.venv-*/
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+dist/
+build/
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Local data artifacts
+data/raw/**
+data/processed/**
+!data/raw/superstore.csv
+!data/processed/superstore_cleaned.csv
+*.parquet
+*.feather
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs and temporary files
+*.log
+*.tmp
+tmp/
