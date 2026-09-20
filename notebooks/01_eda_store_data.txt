@@ -1,0 +1,308 @@
+from pathlib import Path
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import seaborn as sns
+from IPython.display import display
+
+pd.set_option("display.max_columns", 30)
+pd.set_option("display.float_format", lambda value: f"{value:,.2f}")
+sns.set_theme(style="whitegrid", context="notebook")
+plt.rcParams["figure.figsize"] = (10, 5)
+plt.rcParams["axes.titleweight"] = "bold"
+RANDOM_STATE = 42
+
+candidate_paths = [
+    Path("data/raw/store_data.csv"),
+    Path("../data/raw/store_data.csv"),
+]
+data_path = next((path for path in candidate_paths if path.exists()), None)
+if data_path is None:
+    raise FileNotFoundError("Could not locate data/raw/store_data.csv")
+
+df = pd.read_csv(data_path, encoding="latin-1")
+print(f"Source: {data_path.resolve()}")
+print(f"Rows: {len(df):,} | Columns: {df.shape[1]}")
+
+# Exclude direct customer PII from the displayed sample.
+display(df.drop(columns=["Customer Name"], errors="ignore").head())
+
+profile = pd.DataFrame({
+    "dtype_loaded": df.dtypes.astype(str),
+    "non_null": df.notna().sum(),
+    "missing": df.isna().sum(),
+    "missing_pct": df.isna().mean().mul(100),
+    "unique_including_na": df.nunique(dropna=False),
+})
+display(profile)
+
+missing = profile.loc[profile["missing"] > 0, ["missing", "missing_pct"]].sort_values(
+    "missing_pct"
+)
+if not missing.empty:
+    ax = missing["missing_pct"].plot.barh(color="#4C78A8")
+    ax.set(title="Missing values by column", xlabel="Missing rows (%)", ylabel="")
+    for container in ax.containers:
+        ax.bar_label(container, fmt="%.1f%%", padding=3)
+    plt.tight_layout()
+    plt.show()
+
+identifier_checks = pd.Series({
+    "rows": len(df),
+    "exact_duplicate_rows": df.duplicated().sum(),
+    "duplicate_row_ids": df["Row ID"].duplicated().sum(),
+    "unique_row_ids": df["Row ID"].nunique(dropna=False),
+    "unique_orders": df["Order ID"].nunique(dropna=False),
+    "unique_customers": df["Customer ID"].nunique(dropna=False),
+    "unique_products": df["Product ID"].nunique(dropna=False),
+}, name="value").to_frame()
+display(identifier_checks)
+
+order_line_counts = df.groupby("Order ID", dropna=False).size()
+display(order_line_counts.describe().rename("lines_per_order").to_frame())
+
+duplicate_id_sample = (
+    df.loc[df["Row ID"].duplicated(keep=False)]
+      .drop(columns=["Customer Name"], errors="ignore")
+      .sort_values("Row ID")
+      .head(10)
+)
+display(duplicate_id_sample)
+
+eda = df.copy()
+for column in ["Order Date", "Ship Date"]:
+    eda[f"{column} Parsed"] = pd.to_datetime(
+        eda[column], format="%m/%d/%Y", errors="coerce"
+    )
+
+eda["Shipping Days"] = (eda["Ship Date Parsed"] - eda["Order Date Parsed"]).dt.days
+date_checks = pd.DataFrame({
+    "invalid_or_missing": [
+        eda["Order Date Parsed"].isna().sum(),
+        eda["Ship Date Parsed"].isna().sum(),
+    ],
+    "earliest_valid": [
+        eda["Order Date Parsed"].min(),
+        eda["Ship Date Parsed"].min(),
+    ],
+    "latest_valid": [
+        eda["Order Date Parsed"].max(),
+        eda["Ship Date Parsed"].max(),
+    ],
+}, index=["Order Date", "Ship Date"])
+display(date_checks)
+
+shipping_checks = pd.Series({
+    "comparable_rows": eda["Shipping Days"].notna().sum(),
+    "ship_before_order": eda["Shipping Days"].lt(0).sum(),
+    "same_day_shipping": eda["Shipping Days"].eq(0).sum(),
+    "shipping_over_14_days": eda["Shipping Days"].gt(14).sum(),
+    "median_shipping_days": eda["Shipping Days"].median(),
+}, name="value").to_frame()
+display(shipping_checks)
+
+valid_shipping = eda.loc[eda["Shipping Days"].between(0, 30), "Shipping Days"]
+ax = sns.histplot(valid_shipping, discrete=True, color="#4C78A8")
+ax.set(title="Shipping duration distribution (0–30 days)", xlabel="Shipping days")
+plt.tight_layout()
+plt.show()
+
+numeric_columns = ["Sales", "Quantity", "Discount", "Profit"]
+numeric_summary = eda[numeric_columns].describe(
+    percentiles=[0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]
+).T
+display(numeric_summary)
+
+rule_checks = pd.Series({
+    "sales_missing": eda["Sales"].isna().sum(),
+    "sales_negative": eda["Sales"].lt(0).sum(),
+    "quantity_missing": eda["Quantity"].isna().sum(),
+    "quantity_non_positive": eda["Quantity"].le(0).sum(),
+    "quantity_non_integer": ((eda["Quantity"] % 1 != 0) & eda["Quantity"].notna()).sum(),
+    "discount_outside_0_1": (~eda["Discount"].between(0, 1) & eda["Discount"].notna()).sum(),
+    "negative_profit_rows": eda["Profit"].lt(0).sum(),
+}, name="rows").to_frame()
+display(rule_checks)
+
+fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+for column, ax in zip(numeric_columns, axes.flat, strict=True):
+    series = eda[column].dropna()
+    lower, upper = series.quantile([0.01, 0.99])
+    sns.histplot(series.clip(lower, upper), bins=35, kde=True, ax=ax, color="#4C78A8")
+    ax.set_title(f"{column} (display clipped to 1st–99th percentiles)")
+plt.tight_layout()
+plt.show()
+
+categorical_columns = [
+    "Ship Mode", "Segment", "Country", "Region",
+    "Category", "Sub-Category", "State", "City",
+]
+category_profile = pd.DataFrame({
+    "unique_including_na": eda[categorical_columns].nunique(dropna=False),
+    "missing": eda[categorical_columns].isna().sum(),
+    "most_frequent": [
+        eda[column].mode(dropna=True).iloc[0] if not eda[column].mode(dropna=True).empty else np.nan
+        for column in categorical_columns
+    ],
+    "top_frequency": [
+        eda[column].value_counts(dropna=True).iloc[0] if eda[column].notna().any() else 0
+        for column in categorical_columns
+    ],
+})
+display(category_profile)
+
+# Compare raw labels with case/whitespace-normalized labels to expose spelling variants.
+variant_checks = []
+for column in ["Ship Mode", "Segment", "Region", "Category", "Sub-Category"]:
+    normalized = eda[column].astype("string").str.strip().str.casefold()
+    variant_checks.append({
+        "column": column,
+        "raw_unique": eda[column].nunique(dropna=True),
+        "normalized_unique": normalized.nunique(dropna=True),
+        "possible_label_variants": eda[column].nunique(dropna=True) - normalized.nunique(dropna=True),
+    })
+display(pd.DataFrame(variant_checks).set_index("column"))
+
+fig, axes = plt.subplots(2, 2, figsize=(13, 9))
+for column, ax in zip(["Region", "Segment", "Ship Mode", "Category"], axes.flat, strict=True):
+    order = eda[column].value_counts(dropna=False).index
+    sns.countplot(data=eda, y=column, order=order, ax=ax, color="#72B7B2")
+    ax.set_title(f"Rows by {column}")
+    ax.set_xlabel("Rows")
+    ax.set_ylabel("")
+plt.tight_layout()
+plt.show()
+
+dated = eda.dropna(subset=["Order Date Parsed"]).copy()
+dated["Order Month"] = dated["Order Date Parsed"].dt.to_period("M").dt.to_timestamp()
+monthly = (
+    dated.groupby("Order Month", as_index=False)
+         .agg(Sales=("Sales", "sum"), Profit=("Profit", "sum"), Orders=("Order ID", "nunique"))
+)
+display(monthly.tail(12))
+
+fig, axes = plt.subplots(3, 1, figsize=(13, 11), sharex=True)
+for metric, ax, color in zip(
+    ["Sales", "Profit", "Orders"], axes, ["#4C78A8", "#F58518", "#54A24B"], strict=True
+):
+    sns.lineplot(data=monthly, x="Order Month", y=metric, marker="o", ax=ax, color=color)
+    ax.set_title(f"Monthly {metric.lower()}")
+    ax.set_xlabel("")
+plt.tight_layout()
+plt.show()
+
+yearly = (
+    dated.assign(Year=dated["Order Date Parsed"].dt.year)
+         .groupby("Year")
+         .agg(Sales=("Sales", "sum"), Profit=("Profit", "sum"), Orders=("Order ID", "nunique"))
+)
+yearly["Profit Margin %"] = yearly["Profit"].div(yearly["Sales"]).mul(100)
+display(yearly)
+
+eda["Category Analysis"] = eda["Category"].astype("string").str.strip().str.title()
+
+def performance_table(group_column):
+    result = (
+        eda.groupby(group_column, dropna=False)
+           .agg(
+               Rows=("Row ID", "size"),
+               Orders=("Order ID", "nunique"),
+               Sales=("Sales", "sum"),
+               Profit=("Profit", "sum"),
+               Average_Discount=("Discount", "mean"),
+           )
+           .sort_values("Sales", ascending=False)
+    )
+    result["Profit_Margin_%"] = result["Profit"].div(result["Sales"]).mul(100)
+    return result
+
+for dimension in ["Region", "Segment", "Category Analysis", "Ship Mode"]:
+    print(f"Performance by {dimension}")
+    display(performance_table(dimension))
+
+subcategory_performance = performance_table("Sub-Category")
+display(subcategory_performance)
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+plot_data = subcategory_performance.reset_index()
+sns.barplot(data=plot_data, y="Sub-Category", x="Sales", ax=axes[0], color="#4C78A8")
+axes[0].set_title("Sales by sub-category")
+sns.barplot(data=plot_data.sort_values("Profit", ascending=False), y="Sub-Category", x="Profit", ax=axes[1], color="#F58518")
+axes[1].axvline(0, color="black", linewidth=1)
+axes[1].set_title("Profit by sub-category")
+plt.tight_layout()
+plt.show()
+
+discount_bins = [-np.inf, 0, 0.1, 0.2, 0.3, 0.5, 0.8, 1.0, np.inf]
+discount_labels = ["0", "(0, 0.1]", "(0.1, 0.2]", "(0.2, 0.3]", "(0.3, 0.5]", "(0.5, 0.8]", "(0.8, 1.0]", "> 1.0"]
+eda["Discount Band"] = pd.cut(eda["Discount"], bins=discount_bins, labels=discount_labels)
+discount_summary = (
+    eda.groupby("Discount Band", observed=False)
+       .agg(
+           Rows=("Row ID", "size"),
+           Sales=("Sales", "sum"),
+           Profit=("Profit", "sum"),
+           Median_Profit=("Profit", "median"),
+           Loss_Rate=("Profit", lambda values: values.lt(0).mean()),
+       )
+)
+discount_summary["Profit_Margin_%"] = discount_summary["Profit"].div(discount_summary["Sales"]).mul(100)
+display(discount_summary)
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+discount_summary["Profit"].plot.bar(ax=axes[0], color="#F58518")
+axes[0].axhline(0, color="black", linewidth=1)
+axes[0].set(title="Profit by discount band", xlabel="Discount band", ylabel="Profit")
+discount_summary["Loss_Rate"].mul(100).plot.bar(ax=axes[1], color="#E45756")
+axes[1].set(title="Loss-making rows by discount band", xlabel="Discount band", ylabel="Loss rate (%)")
+plt.tight_layout()
+plt.show()
+
+scatter_data = eda.dropna(subset=["Discount", "Profit", "Sales"])
+if len(scatter_data) > 4_000:
+    scatter_data = scatter_data.sample(4_000, random_state=RANDOM_STATE)
+profit_low, profit_high = eda["Profit"].quantile([0.01, 0.99])
+ax = sns.scatterplot(
+    data=scatter_data.assign(Profit_Display=scatter_data["Profit"].clip(profit_low, profit_high)),
+    x="Discount", y="Profit_Display", hue="Category Analysis", alpha=0.55
+)
+ax.axhline(0, color="black", linewidth=1)
+ax.set(title="Discount versus profit (profit clipped for display)", ylabel="Profit, clipped to 1st–99th percentiles")
+plt.tight_layout()
+plt.show()
+
+correlation_columns = ["Sales", "Quantity", "Discount", "Profit", "Shipping Days"]
+correlations = eda[correlation_columns].corr(method="spearman")
+display(correlations)
+sns.heatmap(correlations, annot=True, cmap="vlag", center=0, vmin=-1, vmax=1, fmt=".2f")
+plt.title("Spearman correlations")
+plt.tight_layout()
+plt.show()
+
+order_level = (
+    eda.groupby("Order ID", dropna=False)
+       .agg(
+           Lines=("Row ID", "size"),
+           Sales=("Sales", "sum"),
+           Quantity=("Quantity", "sum"),
+           Profit=("Profit", "sum"),
+           Average_Discount=("Discount", "mean"),
+       )
+)
+display(order_level.describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]).T)
+print(f"Loss-making orders: {order_level['Profit'].lt(0).sum():,} of {len(order_level):,} ({order_level['Profit'].lt(0).mean():.1%})")
+
+total_sales = eda["Sales"].sum()
+total_profit = eda["Profit"].sum()
+summary = pd.DataFrame([
+    ("Dataset size", f"{len(eda):,} rows × {eda.shape[1]} analysis columns"),
+    ("Missing data", f"{int(eda[df.columns].isna().sum().sum()):,} missing cells across {int((eda[df.columns].isna().sum() > 0).sum())} raw columns"),
+    ("Duplicates", f"{int(df.duplicated().sum()):,} exact duplicate rows; {int(df['Row ID'].duplicated().sum()):,} duplicated Row IDs"),
+    ("Date quality", f"{int(eda['Order Date Parsed'].isna().sum()):,} invalid/missing order dates; {int(eda['Shipping Days'].lt(0).sum()):,} rows ship before order"),
+    ("Sales", f"${total_sales:,.2f}"),
+    ("Profit", f"${total_profit:,.2f}; margin {total_profit / total_sales:.2%}" if total_sales else "Undefined"),
+    ("Loss exposure", f"{int(eda['Profit'].lt(0).sum()):,} loss-making rows ({eda['Profit'].lt(0).mean():.1%})"),
+    ("Discount quality", f"{int((~eda['Discount'].between(0, 1) & eda['Discount'].notna()).sum()):,} rows outside the expected [0, 1] range"),
+], columns=["Area", "Finding"])
+display(summary)
